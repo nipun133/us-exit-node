@@ -1,6 +1,6 @@
 #!/bin/sh
 # Tailscale exit-node container for Render free web service.
-# Required env: TS_AUTHKEY  (reusable, ephemeral, tagged auth key from the Tailscale admin console)
+# Required env: TS_AUTHKEY  (reusable, ephemeral auth key from the Tailscale admin console)
 # Optional env: TS_HOSTNAME (default: us-exit), PORT (default: 8080)
 set -eu
 
@@ -10,12 +10,16 @@ SOCK="/var/run/tailscale/tailscaled.sock"
 
 log() { echo "[entrypoint] $*"; }
 
+start_health_server() {
+  # Read the request head first (avoids RST-truncated responses), then answer 200.
+  socat TCP-LISTEN:"${HEALTH_PORT}",fork,reuseaddr SYSTEM:'read -r _; while read -r _ && [ -n "$_" ]; do :; done; printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"' &
+  echo $!
+}
+
 # --- health server ----------------------------------------------------------
 mkdir -p /www
-printf 'ok\n' > /www/index.html
-busybox httpd -f -p "${HEALTH_PORT}" -h /www &
-HTTPD_PID=$!
-log "health server listening on :${HEALTH_PORT} (pid ${HTTPD_PID})"
+HEALTH_PID=$(start_health_server)
+log "health server listening on :${HEALTH_PORT} (pid ${HEALTH_PID})"
 
 # --- tailscaled (userspace / netstack mode) ---------------------------------
 mkdir -p /var/lib/tailscale /var/run/tailscale
@@ -50,12 +54,16 @@ log "advertising exit node as '${TS_HOST}'"
 tailscale status || true
 
 # --- supervise ---------------------------------------------------------------
-# If anything dies, exit non-zero so Render restarts the container;
-# the reusable auth key re-registers the node and the ACL auto-approver
-# re-approves it as an exit node without manual clicks.
+# Health server death is non-fatal (restart it) — the exit node is the real job.
+# tailscaled death is fatal: exit so Render restarts the container; the reusable
+# auth key re-registers the node and the ACL auto-approver re-approves it.
 while :; do
   sleep 20
-  kill -0 "$HTTPD_PID" 2>/dev/null || { log "httpd died"; exit 1; }
+  if ! kill -0 "$HEALTH_PID" 2>/dev/null; then
+    log "health server exited; restarting it"
+    HEALTH_PID=$(start_health_server)
+    log "health server back on :${HEALTH_PORT} (pid ${HEALTH_PID})"
+  fi
   kill -0 "$TS_PID" 2>/dev/null || { log "tailscaled died"; exit 1; }
   tailscale status --json 2>/dev/null | grep -q '"BackendState"' \
     || { log "tailscale daemon not answering"; exit 1; }
