@@ -10,17 +10,20 @@ SOCK="/var/run/tailscale/tailscaled.sock"
 
 log() { echo "[entrypoint] $*"; }
 
+# NOTE: do NOT capture the pid via HEALTH_PID=$(start_health_server) —
+# command substitution waits for every process holding its stdout pipe, so a
+# backgrounded socat would hang the entrypoint here forever (tailscaled would
+# never start). Set the global HEALTH_PID directly in the current shell instead.
 start_health_server() {
-  # health.sh reads the request head, answers 200, and closes (one request per
-  # connection). EXEC runs the script directly — socat's SYSTEM parser chokes
-  # on inline shell commands ("wrong number of parameters").
+  # health.sh answers 200 then drains the request (one request per connection).
+  # EXEC runs the script directly — socat's SYSTEM parser rejects inline
+  # shell commands ("wrong number of parameters").
   socat TCP-LISTEN:"${HEALTH_PORT}",fork,reuseaddr EXEC:/health.sh &
-  echo $!
+  HEALTH_PID=$!
 }
 
 # --- health server ----------------------------------------------------------
-mkdir -p /www
-HEALTH_PID=$(start_health_server)
+start_health_server
 log "health server listening on :${HEALTH_PORT} (pid ${HEALTH_PID})"
 
 # --- tailscaled (userspace / netstack mode) ---------------------------------
@@ -63,7 +66,7 @@ while :; do
   sleep 20
   if ! kill -0 "$HEALTH_PID" 2>/dev/null; then
     log "health server exited; restarting it"
-    HEALTH_PID=$(start_health_server)
+    start_health_server
     log "health server back on :${HEALTH_PORT} (pid ${HEALTH_PID})"
   fi
   kill -0 "$TS_PID" 2>/dev/null || { log "tailscaled died"; exit 1; }
