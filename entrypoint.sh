@@ -11,8 +11,10 @@ SOCK="/var/run/tailscale/tailscaled.sock"
 log() { echo "[entrypoint] $*"; }
 
 start_health_server() {
-  # Read the request head first (avoids RST-truncated responses), then answer 200.
-  socat TCP-LISTEN:"${HEALTH_PORT}",fork,reuseaddr SYSTEM:'read -r _; while read -r _ && [ -n "$_" ]; do :; done; printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"' &
+  # health.sh reads the request head, answers 200, and closes (one request per
+  # connection). EXEC runs the script directly — socat's SYSTEM parser chokes
+  # on inline shell commands ("wrong number of parameters").
+  socat TCP-LISTEN:"${HEALTH_PORT}",fork,reuseaddr EXEC:/health.sh &
   echo $!
 }
 
